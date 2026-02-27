@@ -1,0 +1,29 @@
+# Lab 01 — Standalone: Complete Redis cache and session store in isolation
+# No external dependencies required.
+---
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: it-stack-redis
+    restart: unless-stopped
+    ports:
+      - "6379:$firstPort"
+    environment:
+      - IT_STACK_ENV=lab-01-standalone
+    volumes:
+      - redis_data:/var/lib/redis
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - it-stack-net
+
+networks:
+  it-stack-net:
+    driver: bridge
+
+volumes:
+  redis_data:

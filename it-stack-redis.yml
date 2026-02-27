@@ -1,0 +1,56 @@
+# it-stack-redis.yml — IT-Stack Module Manifest
+# Module 04: Redis cache and session store
+
+module:
+  name: redis
+  number: "04"
+  repo: it-stack-dev/it-stack-redis
+  version: "0.1.0"
+  phase: 1
+  category: database
+  server: lab-db1
+  description: "Redis cache and session store"
+
+upstream:
+  name: Redis
+  image: redis:7-alpine
+  license: BSD-3-Clause
+
+ports:
+  - 6379 (Redis)
+
+labs:
+  - id: "04-01"
+    name: Standalone
+    docker_compose: docker/docker-compose.standalone.yml
+    test_script: tests/labs/test-lab-04-01.sh
+  - id: "04-02"
+    name: External Dependencies
+    docker_compose: docker/docker-compose.lan.yml
+    test_script: tests/labs/test-lab-04-02.sh
+  - id: "04-03"
+    name: Advanced Features
+    docker_compose: docker/docker-compose.advanced.yml
+    test_script: tests/labs/test-lab-04-03.sh
+  - id: "04-04"
+    name: SSO Integration
+    docker_compose: docker/docker-compose.sso.yml
+    test_script: tests/labs/test-lab-04-04.sh
+  - id: "04-05"
+    name: Advanced Integration
+    docker_compose: docker/docker-compose.integration.yml
+    test_script: tests/labs/test-lab-04-05.sh
+  - id: "04-06"
+    name: Production Deployment
+    docker_compose: docker/docker-compose.production.yml
+    test_script: tests/labs/test-lab-04-06.sh
+
+resources:
+  cpu_cores: 2
+  ram_gb: 2
+  disk_gb: 20
+
+health_check:
+  endpoint: /health
+  metrics_endpoint: /metrics
+  log_path: /var/log/redis/

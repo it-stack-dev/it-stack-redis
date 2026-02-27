@@ -1,0 +1,36 @@
+# Lab 02 — External Dependencies: redis with external PostgreSQL and Redis
+---
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: it-stack-redis
+    restart: unless-stopped
+    ports:
+      - "6379:$firstPort"
+    environment:
+      - IT_STACK_ENV=lab-02-lan
+      - DB_HOST=
+      - DB_PORT=5432
+      - REDIS_HOST=
+    networks:
+      - it-stack-net
+
+  # Lightweight local DB for lab (replace with lab-db1 in real env)
+  postgres:
+    image: postgres:16
+    container_name: it-stack-redis-db
+    environment:
+      POSTGRES_DB: redis_db
+      POSTGRES_USER: redis_user
+      POSTGRES_PASSWORD: redis_pass
+    volumes:
+      - redis_pg_data:/var/lib/postgresql/data
+    networks:
+      - it-stack-net
+
+networks:
+  it-stack-net:
+    driver: bridge
+
+volumes:
+  redis_pg_data:
