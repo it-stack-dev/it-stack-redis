@@ -1,53 +1,161 @@
-# Lab 06 — Production: redis HA-ready with monitoring and external volumes
+# Lab 06 -- Production: Redis HA with Sentinel, streaming replicas, Redis Exporter
 ---
+x-redis-common: &redis-common
+  image: redis:7-alpine
+  restart: always
+  networks:
+    - redis-prod-net
+
 services:
-  redis:
-    image: redis:7-alpine
-    container_name: it-stack-redis
-    restart: always
+  redis-master:
+    <<: *redis-common
+    container_name: it-stack-redis-master
     ports:
-      - "6379:$firstPort"
-    environment:
-      - IT_STACK_ENV=production
-      - KEYCLOAK_URL=
-      - DB_HOST=
-      - REDIS_HOST=
-      - GRAYLOG_HOST=
+      - "6379:6379"
+    command: >
+      redis-server
+      --requirepass Lab06Password!
+      --masterauth Lab06Password!
+      --appendonly yes
+      --appendfsync everysec
+      --save 900 1
+      --save 300 10
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --loglevel notice
     volumes:
-      - redis_data:/var/lib/redis
-      - /etc/ssl/certs:/etc/ssl/certs:ro
+      - redis-master-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "Lab06Password!", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     deploy:
-      replicas: 1
       resources:
         limits:
-          cpus: "4.0"
-          memory: G
-        reservations:
           cpus: "1.0"
-          memory: 1G
-      restart_policy:
-        condition: any
-        delay: 5s
-    logging:
-      driver: gelf
-      options:
-        gelf-address: "udp://${GRAYLOG_HOST}:12201"
-        tag: "it-stack-redis"
+          memory: 768M
+
+  redis-replica-1:
+    <<: *redis-common
+    container_name: it-stack-redis-replica-1
+    ports:
+      - "6380:6379"
+    command: >
+      redis-server
+      --requirepass Lab06Password!
+      --masterauth Lab06Password!
+      --replicaof redis-master 6379
+      --appendonly yes
+      --replica-read-only yes
+    volumes:
+      - redis-replica-1-data:/data
+    depends_on:
+      redis-master:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 120s
+      test: ["CMD", "redis-cli", "-a", "Lab06Password!", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+
+  redis-replica-2:
+    <<: *redis-common
+    container_name: it-stack-redis-replica-2
+    ports:
+      - "6381:6379"
+    command: >
+      redis-server
+      --requirepass Lab06Password!
+      --masterauth Lab06Password!
+      --replicaof redis-master 6379
+      --appendonly yes
+      --replica-read-only yes
+    volumes:
+      - redis-replica-2-data:/data
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "Lab06Password!", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768M
+
+  redis-sentinel-1:
+    <<: *redis-common
+    container_name: it-stack-redis-sentinel-1
+    ports:
+      - "26379:26379"
+    command: sh -c "redis-sentinel /etc/redis/sentinel.conf"
+    volumes:
+      - ./production/sentinel.conf:/etc/redis/sentinel.conf:ro
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-replica-1:
+        condition: service_healthy
+      redis-replica-2:
+        condition: service_healthy
+
+  redis-sentinel-2:
+    <<: *redis-common
+    container_name: it-stack-redis-sentinel-2
+    ports:
+      - "26380:26379"
+    command: sh -c "redis-sentinel /etc/redis/sentinel.conf"
+    volumes:
+      - ./production/sentinel.conf:/etc/redis/sentinel.conf:ro
+    depends_on:
+      redis-master:
+        condition: service_healthy
+
+  redis-sentinel-3:
+    <<: *redis-common
+    container_name: it-stack-redis-sentinel-3
+    ports:
+      - "26381:26379"
+    command: sh -c "redis-sentinel /etc/redis/sentinel.conf"
+    volumes:
+      - ./production/sentinel.conf:/etc/redis/sentinel.conf:ro
+    depends_on:
+      redis-master:
+        condition: service_healthy
+
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    container_name: it-stack-redis-exporter
+    ports:
+      - "9121:9121"
+    environment:
+      REDIS_ADDR: "redis://redis-master:6379"
+      REDIS_PASSWORD: "Lab06Password!"
+    depends_on:
+      redis-master:
+        condition: service_healthy
     networks:
-      - it-stack-net
+      - redis-prod-net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
 
 networks:
-  it-stack-net:
-    external: true
-    name: it-stack-production
+  redis-prod-net:
+    driver: bridge
 
 volumes:
-  redis_data:
-    external: true
-    name: it-stack-redis-data
+  redis-master-data:
+  redis-replica-1-data:
+  redis-replica-2-data:

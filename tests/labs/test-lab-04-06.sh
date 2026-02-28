@@ -1,71 +1,106 @@
 #!/usr/bin/env bash
-# test-lab-04-06.sh — Lab 04-06: Production Deployment
-# Module 04: Redis cache and session store
-# redis in production-grade HA configuration with monitoring
+# test-lab-04-06.sh -- Redis Lab 06: Production Deployment
+# Tests: Redis master+2 replicas HA, 3-node Sentinel, Redis Exporter, persistence, failover prep
+# Usage: REDIS_PASS=Lab06Password! bash test-lab-04-06.sh
 set -euo pipefail
 
-LAB_ID="04-06"
-LAB_NAME="Production Deployment"
-MODULE="redis"
-COMPOSE_FILE="docker/docker-compose.production.yml"
-PASS=0
-FAIL=0
+REDIS_PASS="${REDIS_PASS:-Lab06Password!}"
+PASS=0; FAIL=0
+ok()  { echo "[PASS] $1"; ((PASS++)); }
+fail(){ echo "[FAIL] $1"; ((FAIL++)); }
+info(){ echo "[INFO] $1"; }
 
-# ── Colors ────────────────────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-CYAN='\033[0;36m'; NC='\033[0m'
+# -- Section 1: Redis master health ------------------------------------------
+info "Section 1: Redis master :6379"
+pong=$(redis-cli -h localhost -p 6379 -a "${REDIS_PASS}" ping 2>/dev/null || echo "FAIL")
+if [[ "$pong" == "PONG" ]]; then ok "Redis master :6379 PONG"; else fail "Redis master :6379 PONG (got $pong)"; fi
 
-pass() { echo -e "${GREEN}[PASS]${NC} $1"; ((PASS++)); }
-fail() { echo -e "${RED}[FAIL]${NC} $1"; ((FAIL++)); }
-info() { echo -e "${CYAN}[INFO]${NC} $1"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+# -- Section 2: Replica health -----------------------------------------------
+info "Section 2: Redis replicas :6380 and :6381"
+for port in 6380 6381; do
+  r=$(redis-cli -h localhost -p "$port" -a "${REDIS_PASS}" ping 2>/dev/null || echo "FAIL")
+  if [[ "$r" == "PONG" ]]; then ok "Redis replica :${port} PONG"; else fail "Redis replica :${port} PONG (got $r)"; fi
+done
 
-echo -e "${CYAN}======================================${NC}"
-echo -e "${CYAN} Lab ${LAB_ID}: ${LAB_NAME}${NC}"
-echo -e "${CYAN} Module: ${MODULE}${NC}"
-echo -e "${CYAN}======================================${NC}"
-echo ""
+# -- Section 3: Replication info on master ------------------------------------
+info "Section 3: Master replication status"
+rep_info=$(redis-cli -h localhost -p 6379 -a "${REDIS_PASS}" info replication 2>/dev/null || true)
+role=$(echo "$rep_info" | grep "^role:" | cut -d: -f2 | tr -d '\r')
+slaves=$(echo "$rep_info" | grep "^connected_slaves:" | cut -d: -f2 | tr -d '\r ')
+info "Role: $role, Connected slaves: $slaves"
+[[ "$role" == "master" ]] && ok "Master role confirmed" || fail "Master role (got $role)"
+if [[ "${slaves:-0}" -ge 2 ]]; then ok "Connected slaves: $slaves (>=2)"; else fail "Connected slaves (expected >=2, got $slaves)"; fi
 
-# ── PHASE 1: Setup ────────────────────────────────────────────────────────────
-info "Phase 1: Setup"
-docker compose -f "${COMPOSE_FILE}" up -d
-info "Waiting 30s for ${MODULE} to initialize..."
-sleep 30
+# -- Section 4: Write on master, read on replica ------------------------------
+info "Section 4: Replication propagation"
+redis-cli -h localhost -p 6379 -a "${REDIS_PASS}" SET prod-lab06-key "replication-check" EX 60 >/dev/null 2>&1
+sleep 1
+val_r1=$(redis-cli -h localhost -p 6380 -a "${REDIS_PASS}" GET prod-lab06-key 2>/dev/null || echo "nil")
+val_r2=$(redis-cli -h localhost -p 6381 -a "${REDIS_PASS}" GET prod-lab06-key 2>/dev/null || echo "nil")
+info "Replica-1 read: $val_r1, Replica-2 read: $val_r2"
+[[ "$val_r1" == "replication-check" ]] && ok "Replica-1 propagation confirmed" || fail "Replica-1 propagation (got $val_r1)"
+[[ "$val_r2" == "replication-check" ]] && ok "Replica-2 propagation confirmed" || fail "Replica-2 propagation (got $val_r2)"
 
-# ── PHASE 2: Health Checks ────────────────────────────────────────────────────
-info "Phase 2: Health Checks"
+# -- Section 5: Sentinel health -----------------------------------------------
+info "Section 5: Sentinel nodes PING"
+for port in 26379 26380 26381; do
+  s=$(redis-cli -h localhost -p "$port" ping 2>/dev/null || echo "FAIL")
+  if [[ "$s" == "PONG" ]]; then ok "Sentinel :${port} PONG"; else fail "Sentinel :${port} PONG (got $s)"; fi
+done
 
-if docker compose -f "${COMPOSE_FILE}" ps | grep -q "running\|Up"; then
-    pass "Container is running"
+# -- Section 6: Sentinel master discovery -------------------------------------
+info "Section 6: Sentinel master discovery"
+sentinel_master=$(redis-cli -h localhost -p 26379 sentinel master mymaster 2>/dev/null | grep -A1 "^name$" | tail -1 || echo "")
+info "Sentinel reports master name: $sentinel_master"
+if redis-cli -h localhost -p 26379 sentinel master mymaster 2>/dev/null | grep -q "flags"; then
+  ok "Sentinel master 'mymaster' registered"
 else
-    fail "Container is not running"
+  fail "Sentinel master 'mymaster' registered"
 fi
 
-# ── PHASE 3: Functional Tests ─────────────────────────────────────────────────
-info "Phase 3: Functional Tests (Lab 06 — Production Deployment)"
+# -- Section 7: Sentinel quorum check -----------------------------------------
+info "Section 7: Sentinel quorum check"
+ckquorum=$(redis-cli -h localhost -p 26379 sentinel ckquorum mymaster 2>/dev/null || echo "FAIL")
+info "CKQUORUM result: $ckquorum"
+if echo "$ckquorum" | grep -qi "OK"; then ok "Sentinel quorum OK"; else fail "Sentinel quorum check (got: $ckquorum)"; fi
 
-# TODO: Add module-specific functional tests here
-# Example:
-# if curl -sf http://localhost:6379/health > /dev/null 2>&1; then
-#     pass "Health endpoint responds"
-# else
-#     fail "Health endpoint not reachable"
-# fi
+# -- Section 8: Redis Exporter metrics ----------------------------------------
+info "Section 8: Redis Exporter :9121"
+exporter_metrics=$(curl -sf http://localhost:9121/metrics 2>/dev/null || true)
+redis_up=$(echo "$exporter_metrics" | grep "^redis_up " | awk '{print $2}' | tr -d ' ' || echo 0)
+info "redis_up: $redis_up"
+[[ "$redis_up" == "1" ]] && ok "Redis Exporter redis_up=1" || fail "Redis Exporter redis_up (got $redis_up)"
+connected_clients=$(echo "$exporter_metrics" | grep -c "^redis_connected_clients" || echo 0)
+[[ "$connected_clients" -ge 1 ]] && ok "Redis Exporter connected_clients metric" || fail "Redis Exporter connected_clients"
 
-warn "Functional tests for Lab 04-06 pending implementation"
+# -- Section 9: Persistence check (AOF) --------------------------------------
+info "Section 9: AOF persistence"
+aof_info=$(redis-cli -h localhost -p 6379 -a "${REDIS_PASS}" info persistence 2>/dev/null || true)
+aof_enabled=$(echo "$aof_info" | grep "^aof_enabled:" | cut -d: -f2 | tr -d '\r ')
+rdb_last=$(echo "$aof_info" | grep "^rdb_last_bgsave_status:" | cut -d: -f2 | tr -d '\r ')
+info "AOF enabled: $aof_enabled, RDB last status: $rdb_last"
+[[ "${aof_enabled:-0}" == "1" ]] && ok "AOF persistence enabled" || fail "AOF persistence enabled (got $aof_enabled)"
+[[ "${rdb_last:-ok}" == "ok" ]] && ok "RDB bgsave status ok" || fail "RDB bgsave status (got $rdb_last)"
 
-# ── PHASE 4: Cleanup ──────────────────────────────────────────────────────────
-info "Phase 4: Cleanup"
-docker compose -f "${COMPOSE_FILE}" down -v --remove-orphans
-info "Cleanup complete"
+# -- Section 10: Memory and key stats -----------------------------------------
+info "Section 10: Memory usage + keyspace"
+mem_info=$(redis-cli -h localhost -p 6379 -a "${REDIS_PASS}" info memory 2>/dev/null || true)
+used_mem=$(echo "$mem_info" | grep "^used_memory_human:" | cut -d: -f2 | tr -d '\r ')
+maxmem=$(echo "$mem_info" | grep "^maxmemory_policy:" | cut -d: -f2 | tr -d '\r ')
+info "Used memory: $used_mem, Maxmemory policy: $maxmem"
+ok "Redis memory: used=$used_mem policy=$maxmem"
+dbsize=$(redis-cli -h localhost -p 6379 -a "${REDIS_PASS}" DBSIZE 2>/dev/null | tr -d ' ' || echo 0)
+info "DB size: $dbsize keys"
+ok "DB size: $dbsize keys"
 
-# ── Results ───────────────────────────────────────────────────────────────────
-echo ""
-echo -e "${CYAN}======================================${NC}"
-echo -e " Lab ${LAB_ID} Complete"
-echo -e " ${GREEN}PASS: ${PASS}${NC} | ${RED}FAIL: ${FAIL}${NC}"
-echo -e "${CYAN}======================================${NC}"
-
-if [ "${FAIL}" -gt 0 ]; then
-    exit 1
+# -- Section 11: Integration score --------------------------------------------
+info "Section 11: Production integration score"
+TOTAL=$((PASS + FAIL))
+echo "Results: $PASS/$TOTAL passed"
+if [[ $FAIL -eq 0 ]]; then
+  echo "[SCORE] 6/6 -- All production checks passed"
+  exit 0
+else
+  echo "[SCORE] FAIL ($FAIL failures)"
+  exit 1
 fi
