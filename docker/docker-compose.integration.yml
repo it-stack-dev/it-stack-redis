@@ -1,26 +1,137 @@
-# Lab 05 — Advanced Integration: redis with full IT-Stack ecosystem
----
 services:
-  redis:
-    image: redis:7-alpine
-    container_name: it-stack-redis
-    restart: unless-stopped
-    ports:
-      - "6379:$firstPort"
+
+  # ── PostgreSQL: app data store ────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
     environment:
-      - IT_STACK_ENV=lab-05-integration
-      - KEYCLOAK_URL=
-      - DB_HOST=
-      - REDIS_HOST=
-      - SMTP_HOST=
-      - GRAYLOG_HOST=
-    extra_hosts:
-      - "lab-id1:10.0.50.11"
-      - "lab-db1:10.0.50.12"
-      - "lab-proxy1:10.0.50.15"
+      POSTGRES_DB: labapp
+      POSTGRES_USER: labadmin
+      POSTGRES_PASSWORD: Lab05Password!
+    ports:
+      - "5432:5432"
     networks:
-      - it-stack-net
+      - int-net
+    volumes:
+      - pg-int:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U labadmin"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ── Redis: cache + session store (LRU eviction) ───────────────────
+  redis:
+    image: redis:7.2-alpine
+    command: >
+      redis-server
+      --requirepass Lab05Password!
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --notify-keyspace-events KEA
+    ports:
+      - "6379:6379"
+    networks:
+      - int-net
+    volumes:
+      - redis-int:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "Lab05Password!", "--no-auth-warning", "PING"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  # ── Keycloak KC-DB (uses Postgres) ────────────────────────────────
+  kc-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: kcadmin
+      POSTGRES_PASSWORD: Lab05Password!
+    networks:
+      - kc-db-net
+    volumes:
+      - kc-db-int:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kcadmin"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ── Keycloak: identity provider ───────────────────────────────────
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    command: start-dev
+    depends_on:
+      kc-db:
+        condition: service_healthy
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: Lab05Password!
+      KC_DB: postgres
+      KC_DB_URL: "jdbc:postgresql://kc-db:5432/keycloak"
+      KC_DB_USERNAME: kcadmin
+      KC_DB_PASSWORD: Lab05Password!
+      KC_HTTP_PORT: "8080"
+      KC_HOSTNAME_STRICT: "false"
+      KC_PROXY: edge
+    ports:
+      - "8080:8080"
+    networks:
+      - int-net
+      - kc-db-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  # ── App node (simulates app w/ PG + Redis integration) ────────────
+  app:
+    image: traefik/whoami:latest
+    environment:
+      WHOAMI_NAME: "redis-app"
+    networks:
+      - int-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.app.rule=PathPrefix(`/app`)"
+      - "traefik.http.routers.app.entrypoints=web"
+      - "traefik.http.services.app.loadbalancer.server.port=80"
+
+  # ── Traefik: routes + metrics ─────────────────────────────────────
+  traefik:
+    image: traefik:v3.0
+    command:
+      - --api.dashboard=true
+      - --api.insecure=true
+      - --entrypoints.web.address=:80
+      - --entrypoints.metrics.address=:8082
+      - --metrics.prometheus=true
+      - --metrics.prometheus.entrypoint=metrics
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+    ports:
+      - "80:80"
+      - "8081:8080"
+      - "8082:8082"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - int-net
+    depends_on:
+      keycloak:
+        condition: service_healthy
 
 networks:
-  it-stack-net:
+  int-net:
     driver: bridge
+  kc-db-net:
+    driver: bridge
+    internal: true
+
+volumes:
+  pg-int:
+  redis-int:
+  kc-db-int:
