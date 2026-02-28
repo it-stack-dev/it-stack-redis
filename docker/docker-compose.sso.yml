@@ -1,34 +1,120 @@
-# Lab 04 — SSO Integration: redis with Keycloak OIDC authentication
----
 services:
-  redis:
-    image: redis:7-alpine
-    container_name: it-stack-redis
-    restart: unless-stopped
-    ports:
-      - "6379:$firstPort"
-    environment:
-      - IT_STACK_ENV=lab-04-sso
-      - KEYCLOAK_URL=
-      - KEYCLOAK_REALM=
-      - KEYCLOAK_CLIENT_ID=redis
-      - KEYCLOAK_CLIENT_SECRET=
-    networks:
-      - it-stack-net
 
-  # Local Keycloak for SSO lab (replace with lab-id1 in real env)
-  keycloak:
-    image: quay.io/keycloak/keycloak:24
-    container_name: it-stack-redis-keycloak
-    command: start-dev
+  # ── Keycloak backing DB (internal) ────────────────────────────────
+  kc-db:
+    image: postgres:16-alpine
     environment:
-      KEYCLOAK_ADMIN: admin
-      KEYCLOAK_ADMIN_PASSWORD: admin
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: kcadmin
+      POSTGRES_PASSWORD: Lab04Password!
+    networks:
+      - kc-db-net
+    volumes:
+      - kc-db-sso:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kcadmin -d keycloak"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # ── Keycloak SSO provider ──────────────────────────────────────────
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    command: start-dev
+    depends_on:
+      kc-db:
+        condition: service_healthy
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: Lab04Password!
+      KC_DB: postgres
+      KC_DB_URL: "jdbc:postgresql://kc-db:5432/keycloak"
+      KC_DB_USERNAME: kcadmin
+      KC_DB_PASSWORD: Lab04Password!
+      KC_HTTP_PORT: "8080"
+      KC_HOSTNAME_STRICT: "false"
+      KC_PROXY: edge
     ports:
       - "8080:8080"
     networks:
-      - it-stack-net
+      - kc-app-net
+      - kc-db-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  # ── Redis (single node for SSO lab) ──────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    command: >
+      redis-server
+      --requirepass Lab04Password!
+      --appendonly yes
+    ports:
+      - "6379:6379"
+    networks:
+      - redis-sso-net
+    volumes:
+      - redis-sso:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "Lab04Password!", "--no-auth-warning", "PING"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  # ── Redis Commander web UI (upstream for oauth2-proxy) ────────────
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOSTS: "local:redis:6379:0:Lab04Password!"
+      HTTP_USER: admin
+      HTTP_PASSWORD: Lab04Password!
+    networks:
+      - redis-sso-net
+      - kc-app-net
+
+  # ── oauth2-proxy: gates Redis Commander with Keycloak OIDC ────────
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.6.0
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      redis-commander:
+        condition: service_started
+    command:
+      - --provider=oidc
+      - --oidc-issuer-url=http://keycloak:8080/realms/it-stack
+      - --client-id=oauth2-proxy
+      - --client-secret=Lab04Password!
+      - --cookie-secret=YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4
+      - --email-domain=*
+      - --upstream=http://redis-commander:8081
+      - --http-address=0.0.0.0:4180
+      - --redirect-url=http://localhost:4180/oauth2/callback
+      - --skip-provider-button=true
+      - --cookie-secure=false
+      - --skip-jwt-bearer-tokens=true
+    ports:
+      - "4180:4180"
+    networks:
+      - kc-app-net
+      - redis-sso-net
 
 networks:
-  it-stack-net:
+  redis-sso-net:
     driver: bridge
+  kc-app-net:
+    driver: bridge
+  kc-db-net:
+    driver: bridge
+    internal: true
+
+volumes:
+  kc-db-sso:
+  redis-sso:
