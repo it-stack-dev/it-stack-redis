@@ -1,23 +1,46 @@
-# Lab 01 — Standalone: Complete Redis cache and session store in isolation
-# No external dependencies required.
+# Lab 04-01 — Standalone: Redis 7 in complete isolation
+# Purpose : Verify Redis install, auth, data structures, and persistence
+# Duration: 20–30 minutes  |  Machines: 1
+# Usage   : docker compose -f docker/docker-compose.standalone.yml up -d
 ---
 services:
   redis:
     image: redis:7-alpine
-    container_name: it-stack-redis
+    container_name: it-stack-redis-lab01
     restart: unless-stopped
     ports:
-      - "6379:$firstPort"
-    environment:
-      - IT_STACK_ENV=lab-01-standalone
+      - "6379:6379"
+    command: >
+      redis-server
+      --requirepass "Lab01Password!"
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfilename "appendonly.aof"
+      --loglevel notice
+      --bind 0.0.0.0
+      --protected-mode no
     volumes:
-      - redis_data:/var/lib/redis
+      - redis_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost/health || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
+      test: ["CMD", "redis-cli", "-a", "Lab01Password!", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks:
+      - it-stack-net
+
+  # Redis Insight — web UI for visual inspection (optional)
+  redis-insight:
+    image: redis/redisinsight:latest
+    container_name: it-stack-redis-insight-lab01
+    restart: unless-stopped
+    ports:
+      - "5540:5540"
+    depends_on:
+      redis:
+        condition: service_healthy
     networks:
       - it-stack-net
 
@@ -27,3 +50,4 @@ networks:
 
 volumes:
   redis_data:
+    name: it-stack-redis-lab01-data
